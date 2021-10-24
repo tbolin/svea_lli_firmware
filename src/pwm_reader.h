@@ -1,8 +1,9 @@
 #ifndef SVEA_PWM_READER
 #define SVEA_PWM_READER
 #include <Arduino.h>
-#include "actuation_constants.h"
+//#include "actuation_constants.h"
 #include "utility.h"
+#include "actuation.h"
 namespace pwm_reader{
 
 /*! @file pwm_reader.h*/ 
@@ -127,6 +128,16 @@ inline uint8_t switchPwmBuffer(){
   return PREV_PWM_BUFFER_IX;
 }
 
+bool checkForPwmErrors(unsigned long duration){
+  if (duration < PWM_IN_MIN_PW - PWM_IN_ERROR_LIMIT
+      || duration > PWM_IN_MAX_PW + PWM_IN_ERROR_LIMIT){
+        return false;
+  }
+  else {
+    return true;
+  }
+}
+
 /*!
  * Convert a pwm duration from the remote to an actuation value. 
  * Returns -128 if the duration is longer or shorter than the
@@ -135,20 +146,18 @@ inline uint8_t switchPwmBuffer(){
  */
 int8_t pwmToActuation(unsigned long duration){
   const static float actuation_scaling = 254.0 / (PWM_IN_MAX_PW - PWM_IN_MIN_PW);
-  if (duration < PWM_IN_MIN_PW - PWM_IN_ERROR_LIMIT){
-    return -128;
-  }
-  if (duration > PWM_IN_MAX_PW + PWM_IN_ERROR_LIMIT){
+  bool signal_ok = checkForPwmErrors(duration);
+  if (!signal_ok) {
     return -128;
   }
   if (duration < PWM_IN_MIN_PW) {
-    return ACTUATION_MIN;
+    return actuation::ACTUATION_MIN;
   }
   if (duration > PWM_IN_MAX_PW) {
-    return ACTUATION_MAX;
+    return actuation::ACTUATION_MAX;
   }
   duration -= PWM_IN_MIN_PW;
-  int8_t actuation = (duration*actuation_scaling - ACTUATION_MAX);
+  int8_t actuation = (duration*actuation_scaling - actuation::ACTUATION_MAX);
   return actuation;
 }
 
@@ -170,7 +179,7 @@ int8_t pwmToActuation(unsigned long duration){
  *  Switch middle -> forward diff 1 (locked), back diff 0 (unlocked)
  *  Switch middle -> forward diff 1 (locked), back diff 1 (locked) and REM_OVERRIDE = true
  */
-bool processPwm(int8_t actuation_values[5]){
+bool processPwm(actuation::Actuation values){
   const static unsigned int pwm_middle = (PWM_IN_MIN_PW + PWM_IN_MAX_PW)*0.5;
   /* If the duration since last rising edge is more than 2.2 ms:
    * Transmit recieved information to the computer
@@ -182,24 +191,28 @@ bool processPwm(int8_t actuation_values[5]){
     uint8_t buffer_ix = switchPwmBuffer();
     interrupts();
     unsigned long duration = PWM_IN_DURATIONS[buffer_ix][0]; // Steering 
-    actuation_values[0] = pwmToActuation(duration);
+    values.n.steering = pwmToActuation(duration);
     duration = PWM_IN_DURATIONS[buffer_ix][1]; // Velocity
-    actuation_values[1] = pwmToActuation(duration);
-    duration = PWM_IN_DURATIONS[buffer_ix][2]; // Gear
-    actuation_values[2] = duration < pwm_middle ? MSG_TO_ACT_ON[0] : MSG_TO_ACT_OFF[0];
-    duration = PWM_IN_DURATIONS[buffer_ix][3]; // F. Diff
-    actuation_values[3] = duration < pwm_middle ? MSG_TO_ACT_ON[1] : MSG_TO_ACT_OFF[1]; 
-    duration = PWM_IN_DURATIONS[buffer_ix][4]; // R. Diff
-    // Yes, the rear differential should be reversed
-    actuation_values[4] = duration > pwm_middle ? MSG_TO_ACT_ON[2] : MSG_TO_ACT_OFF[2];
+    values.n.velocity = pwmToActuation(duration);
+    const actuation::act_t on = actuation::ACTUATION_MAX;
+    const actuation::act_t off = actuation::ACTUATION_MIN;
+    for (int i=2; i < values.NUMEL; i++){
+      duration = PWM_IN_DURATIONS[buffer_ix][i]; // Velocity
+      if (checkForPwmErrors(duration)){
+        values.array[i] = duration < pwm_middle ? on : off;
+      } 
+      else {
+        values.array[i] = -128;
+      }
+    }
     // Check if the remote is disconnected
     // Some receivers will send a middle value on the 
     // R. Diff. channel when no remote is connected.
     // Other receivers just holds the R. Diff channel low.
     unsigned long last_received_duration = abs_difference(duration, pwm_middle);
     bool durations_ok = true;
-    for (int i=0; i<5; i++){
-      if (actuation_values[i] == -128){
+    for (int i=0; i<values.NUMEL; i++){
+      if (values.array[i] == -128){
         durations_ok = false;
         break;
       }
@@ -214,7 +227,7 @@ bool processPwm(int8_t actuation_values[5]){
       REM_IDLE = false;
       // Check if remote override is on by checking if channel 5 
       // is in the rear differential lock active position.
-      REM_OVERRIDE = (actuation_values[4] == MSG_TO_ACT_ON[2]);
+      REM_OVERRIDE = (values.n.r_diff == on);
     }
     PWM_HIGH_RECEIVED = false;
     pwm_processed = true;

@@ -7,92 +7,68 @@
 #include <svea_msgs/lli_encoder.h>
 #include <svea_msgs/lli_emergency.h>
 #include "encoders.h"
-#include "settings.h"
+// #include "settings.h"
 #include "svea_teensy.h"
 #include "pwm_reader.h"
 #include "utility.h"
 #include "Adafruit_MCP23008.h"
 #include "led_control.h"
 #include "buttons.h"
-/*! @file svea_arduino_src.ino*/ 
+#include "actuation.h"
+/*! @file main.cpp*/ 
 
-/*
- * ACTUATION FUNCTIONS
- */
 
-/*! 
- * @brief Set actuation PWM
- * convert a 8 bit actuation value to a pwm signal and send it to the pwm board. 
- * The value gets scaled to a duration that suits the servos (approximately 
- * 1 to 2 milli seconds).
- * @see INPUT_SCALE
- * @see PWM_NEUTRAL_TICK
- * To avoid servo jitter at neutral a small dead zone exists around 0. 
- * @see DEAD_ZONE
- * @param channel The channel (pin) of the pwm board to send to. 
- * @param in_value Value, between -127 and 127. to send.
- */ 
-inline void setPwmDriver(uint8_t channel, int8_t actuation_value){
-  if (abs_difference(actuation_value, ACTUATION_NEUTRAL) < DEAD_ZONE) {
-    actuation_value = ACTUATION_NEUTRAL;
-  }
-  uint16_t off_tick = PWM_OUT_NEUTRAL_TICK[channel] + OUTPUT_SCALE[channel]*actuation_value;
-  ACTUATED_TICKS[channel] = off_tick;
-  analogWrite(PWM_OUT_PINS[channel], off_tick);
-}
-
-/*! @brief Send settings to the pwm board through setPwmDriver()
- * 
- * If any setting or actuation code have changed, the current 
- * actuation values and flags will be published on /lli/ctrl_actuated.
- * If nothing have been changed, nothing will be sent to the
- * pwm board or /lli/ctrl_actuated.
- * @see setPwmDriver
- * @param actuation_values array containg 5 values. 
- */
-void actuate(const int8_t actuation_values[]){
-  /* Set steering and velocity */
-  static int8_t previous_setting[5] = {IDLE_ACTUATION[0],
-                                       IDLE_ACTUATION[1],
-                                       MSG_TO_ACT_OFF[0],
-                                       IDLE_ACTUATION[3],
-                                       IDLE_ACTUATION[4]};
-  static uint8_t last_actuated_code = 0; // Code that was last sent to ROS
-  int8_t has_changed = 0;
-  for (int i=0; i<5; i++){
-    if (actuation_values[i] != previous_setting[i] && actuation_values[i] != -128) {
-      setPwmDriver(i, actuation_values[i]);
-      previous_setting[i] = actuation_values[i];
-      has_changed++;
-    }
-  }
-  // Send actuated values to ROS
-  uint8_t actuated_code = getActuatedCode(); 
-  if (has_changed > 0 || actuated_code^last_actuated_code) {
-    MSG_ACTUATED.steering = STEERING_DIRECTION*previous_setting[0];
-    MSG_ACTUATED.velocity = previous_setting[1];
-    MSG_ACTUATED.trans_diff = bit(ENABLE_GEARCHANGE_BIT)
-                            | bit(ENABLE_FDIFCHANGE_BIT)
-                            | bit(ENABLE_RDIFCHANGE_BIT);
-    for (int i=0; i<3; i++){
-      MSG_ACTUATED.trans_diff += previous_setting[i+2] == MSG_TO_ACT_ON[i] ? bit(i):0;
-    }
-    MSG_ACTUATED.ctrl = actuated_code;
-    ctrl_actuated_pub.publish(&MSG_ACTUATED);
-    last_actuated_code = actuated_code;
-  }
-}
+const uint8_t STEERING_CLOCKWISE = 1;
+const uint8_t STEERING_COUNTERCLOCKWISE = -1;
+//! Sets the steering direction that is sent and recieved from ROS
+const uint8_t STEERING_DIRECTION = STEERING_COUNTERCLOCKWISE;
 
 /*!
- * @brief set the control code in messages sent to the computer
+ * @brief set the control code in messages sent to ROS
  */
-inline uint8_t getActuatedCode() {
+inline uint8_t getStatusFlags() {
   return SW_IDLE 
          | pwm_reader::REM_IDLE << 1 
          | pwm_reader::REM_OVERRIDE << 2 
          | SW_EMERGENCY << 3;
 }
-// END OF ACTUATION FUNCTIONS
+
+void publishActuationValues(const actuation::Actuation values, lli_ctrl_out_t& msg, ros::Publisher& pub){
+  msg.steering = STEERING_DIRECTION*values.n.steering;
+  msg.velocity = values.n.velocity;
+  msg.trans_diff = bit(ENABLE_GEARCHANGE_BIT)
+                 | bit(ENABLE_FDIFCHANGE_BIT)
+                 | bit(ENABLE_RDIFCHANGE_BIT);
+  for (int i=0; i<3; i++){
+    msg.trans_diff += values.array[i+2] > actuation::ACTUATION_NEUTRAL ? bit(i) : 0;
+  }
+  msg.ctrl = getStatusFlags();
+  pub.publish(&msg);
+}
+
+void publishRemoteReading(const actuation::Actuation& values){
+  publishActuationValues(
+    values,
+    MSG_REMOTE,
+    remote_pub
+  );
+}
+
+void actuateAndPublish(const actuation::Actuation& values){
+  static uint8_t last_status = 0; // Code that was last sent to ROS
+  uint8_t changed = actuation::actuate(values);
+  uint8_t new_status = getStatusFlags();
+  if (changed != 0 || last_status != new_status){
+    actuation::Actuation new_values;
+    actuation::getActuatedValues(new_values);
+    publishActuationValues(
+      new_values,
+      MSG_ACTUATED,
+      ctrl_actuated_pub
+    );
+    last_status = new_status;
+  }
+}
 
 /*
  * SETUP ROS
@@ -106,24 +82,26 @@ inline uint8_t getActuatedCode() {
  * @param data Message to be evaluated
  */
 void callbackCtrlRequest(const lli_ctrl_in_t& data){  
-  SW_ACTUATION[0] = STEERING_DIRECTION * data.steering;
-  SW_ACTUATION[1] = data.velocity;
+  SW_ACTUATION.n.steering = STEERING_DIRECTION * data.steering;
+  SW_ACTUATION.n.velocity = data.velocity;
   
   // Set the on/off values
   for (int i=0; i<3; i++){
     // Only change gear/diff settings if the corresponding enable change bit is set
-    if(data.trans_diff & bit(ENABLE_ACT_CHANGE_BITS[i])){ 
+    if(data.trans_diff & bit(ENABLE_ACT_CHANGE_BITS[i])){
+      const actuation::act_t on = actuation::ACTUATION_MAX;
+      const actuation::act_t off = actuation::ACTUATION_MIN;
       int8_t is_on = data.trans_diff & bit(ACT_BITS[i]);
-      SW_ACTUATION[i+2] = is_on ? MSG_TO_ACT_ON[i]:MSG_TO_ACT_OFF[i]; 
+      SW_ACTUATION.array[i+2] = is_on ? on : off; 
     }
     else { // Otherwise use the previous value
-      SW_ACTUATION[i+2] = -128;
+      SW_ACTUATION.array[i+2] = -128;
     }
   }
   SW_IDLE = false; 
   SW_T_RECIEVED = millis();
   if (!pwm_reader::REM_OVERRIDE && !SW_EMERGENCY){
-    actuate(SW_ACTUATION);
+    actuateAndPublish(SW_ACTUATION);
   }
 }
 
@@ -168,12 +146,11 @@ bool checkEmergencyBrake(){
   static States state = NO_EMERGENCY;
   static unsigned long last_time = millis();
   const unsigned long reverse_wait_time = 50; // (ms)
-  const int8_t init_brake_actuation[] = {-128,15,-128,-128,-128};
-  const int8_t brake_actuation[] = {-128,-127,-128,-128,-128};
+  const actuation::Actuation init_brake_actuation = {-128,15,-128,-128,-128};
+  const actuation::Actuation brake_actuation = {-128,-127,-128,-128,-128};
   // const unsigned long minimum_emergency_duration = 500;
   unsigned long wait_duration = (millis() - last_time);
-  if (SW_EMERGENCY == false) {// && 
-      //wait_duration > minimum_emergency_duration){
+  if (SW_EMERGENCY == false) {
     state = NO_EMERGENCY;
   }
   switch (state)
@@ -185,7 +162,7 @@ bool checkEmergencyBrake(){
       break;
     }
   case EMERGENCY_SET:
-    actuate(init_brake_actuation);
+    actuateAndPublish(init_brake_actuation);
     last_time = millis();
     state = WAIT_FOR_UNSET_REVERSE;
     break;
@@ -196,7 +173,7 @@ bool checkEmergencyBrake(){
       break;
     }
   case BRAKING:
-    actuate(brake_actuation);
+    actuateAndPublish(brake_actuation);
     state = DONE_BRAKING;
     break;
   case DONE_BRAKING:
@@ -207,104 +184,11 @@ bool checkEmergencyBrake(){
   return state != NO_EMERGENCY;
 }
 
-void publishRemoteReading(int8_t actuation_values[5]){
-  MSG_REMOTE.steering = actuation_values[0];
-  MSG_REMOTE.velocity = actuation_values[1];
-  // Remote messages should always enforce change
-  MSG_REMOTE.trans_diff = bit(ENABLE_GEARCHANGE_BIT)
-                         | bit(ENABLE_FDIFCHANGE_BIT)
-                         | bit(ENABLE_RDIFCHANGE_BIT);
-  for (int i=0; i<3; i++){
-    if (actuation_values[i+2] == MSG_TO_ACT_ON[i]){
-      MSG_REMOTE.trans_diff |= bit(i);
-    }
-  }
-  MSG_REMOTE.ctrl = getActuatedCode();
-  remote_pub.publish(&MSG_REMOTE); 
-}
-
 void EncoderReadingToMsg(const encoders::encoder_reading_t& reading, lli_encoder_t& msg){
   msg.right_ticks = reading.right_ticks;
   msg.left_ticks = reading.left_ticks;
   msg.right_time_delta = reading.right_time_delta;
   msg.left_time_delta = reading.left_time_delta;
-}
-
-/*!
- * @brief Steering callibration functionality. Should be called in every loop update.
- *
- * Initiate callibration by holding down button 0 for 1 second.
- * The LEDs should turn yellow. Now turn the tires as far to the left
- * as they can go without pushing against the chassis. 
- * Push button 0 again. The LEDs should turn blue. 
- * Turn the tire as far to the right as they can go without
- * pushing against the chassis. 
- * Push button 0 again and the LEDs should blink for a short while.
- * The callibration is complet and the values have been saved to flash.
- * 
- * The calibration process can be aborted by pushing button 1.
- * 
- * @return true if a calibration is ongoing, false otherwise
- */
-bool callibrateSteering(){
-    enum CalibState {
-      NOT_CALIBRATING,
-      TURN_LEFT,
-      TURN_RIGHT,
-      DONE,
-    };
-    const uint8_t calib_button = 0;
-    const uint8_t abort_button = 1;
-    static CalibState state = NOT_CALIBRATING;
-    static float max_pwm = DEFAULT_PWM_OUT_MAX_PW[0];
-    static float min_pwm = DEFAULT_PWM_OUT_MIN_PW[0];
-    static unsigned long done_time;
-    const unsigned long done_duration = 1500; //ms
-    if (buttons::readEvent(abort_button) == buttons::PRESSED){
-      state = NOT_CALIBRATING;
-      if(loadSteeringValues(min_pwm, max_pwm)){
-        setSteeringPwm(min_pwm, max_pwm);
-      }
-    }
-    switch (state)
-    {
-    case NOT_CALIBRATING:
-      if (buttons::readEvent(calib_button) == buttons::LONG_PRESSED
-          && !pwm_reader::REM_IDLE){
-        state = TURN_LEFT;
-        int steer_ix = 0;
-        max_pwm = DEFAULT_PWM_OUT_MAX_PW[steer_ix];
-        min_pwm = DEFAULT_PWM_OUT_MIN_PW[steer_ix];
-        setSteeringPwm(min_pwm, max_pwm);
-        led::setLEDs(led::color_yelow);
-      }
-      break;
-    case TURN_LEFT:
-      if (buttons::readEvent(calib_button) == buttons::PRESSED){
-        min_pwm = 1000.0 * ACTUATED_TICKS[0] / (PWM_OUT_RES*PWM_OUT_FREQUENCY);
-        state = TURN_RIGHT;
-        led::setLEDs(led::color_blue);
-      }
-      break;
-    case TURN_RIGHT:
-      if (buttons::readEvent(calib_button) == buttons::PRESSED){
-        max_pwm = 1000.0 * ACTUATED_TICKS[0] / (PWM_OUT_RES*PWM_OUT_FREQUENCY);
-        setSteeringPwm(min_pwm, max_pwm);
-        saveSteeringValues(min_pwm, max_pwm);
-        done_time = millis();
-        led::pushLEDs(led::color_blue);
-        state = DONE;
-      }
-      break;
-    case DONE:
-      if(millis() - done_time < done_duration){
-        led::blinkLEDs();
-      } else {
-        state = NOT_CALIBRATING;
-      }
-      break;
-    }
-    return state != NOT_CALIBRATING;
 }
 
 //! Setup ROS
@@ -328,7 +212,7 @@ Adafruit_MCP23008 gpio_extender(Master1);
 
 //! Arduino setup function
 void setup() {
-  setupActuation();
+  actuation::setup();
   /* ROS setup */
   rosSetup();
   pinMode(LED_BUILTIN, OUTPUT);
@@ -349,12 +233,12 @@ void loop() {
     SW_IDLE = true;
   }
   checkEmergencyBrake();
-  int8_t remote_actuations[5];
+  actuation::Actuation remote_actuations;
   if (pwm_reader::processPwm(remote_actuations)){
     if (!pwm_reader::REM_IDLE){
       publishRemoteReading(remote_actuations);
       if ((SW_IDLE && !SW_EMERGENCY) || pwm_reader::REM_OVERRIDE){
-        actuate(remote_actuations);
+        actuateAndPublish(remote_actuations);
       }
       if (d_since_last_msg > EMERGENCY_T_CLEAR_LIMIT
           && pwm_reader::REM_OVERRIDE 
@@ -365,7 +249,7 @@ void loop() {
   }
   if (pwm_reader::REM_IDLE && SW_IDLE && !SW_EMERGENCY) {
     if (!all_idle){
-      actuate(IDLE_ACTUATION);
+      actuateAndPublish(actuation::IDLE_ACTUATION);
       gpio_extender.digitalWrite(SERVO_PWR_ENABLE_PIN, LOW);
     }
     all_idle = true;
@@ -382,9 +266,11 @@ void loop() {
     ;
   }
   buttons::updateButtons();
-  bool is_calibrating = callibrateSteering();
+  actuation::CalibState calibration_status = actuation::callibrateSteering();
   // LED logic
-  if (is_calibrating == false){
+  switch (calibration_status)
+  {
+  case actuation::CalibState::NOT_CALIBRATING:
     if (all_idle && !SW_EMERGENCY) {
       led::blinkLEDs();
     }
@@ -410,6 +296,17 @@ void loop() {
         led::setLED(3, led::color_green);
       }
     }
+    break;
+  case actuation::CalibState::TURN_LEFT:
+    led::setLEDs(led::color_blue);
+    break;
+  case actuation::CalibState::TURN_RIGHT:
+    led::setLEDs(led::color_blue);
+    break;
+  case actuation::CalibState::DONE:
+    led::blinkLEDs();
+    break;
   }
+
   led::updateLEDs();
 }

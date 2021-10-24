@@ -1,7 +1,7 @@
 /*! @file settings.h*/ 
 #ifndef SVEA_UTILITY
 #define SVEA_UTILITY
-#include <Arduino.h>
+#include <cstdint>
 
 
 /*!
