@@ -72,7 +72,7 @@ const uint8_t ENABLE_ACT_CHANGE_BITS[3] = {ENABLE_GEARCHANGE_BIT, ENABLE_FDIFCHA
  */
 /*@{*/
 //! Actuation values sent from the computer
-actuation::Actuation SW_ACTUATION;
+actuate::Actuation SW_ACTUATION;
 
 /*!  
  * @defgroup StatusVariables Status variables

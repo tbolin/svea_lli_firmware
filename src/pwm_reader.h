@@ -77,15 +77,6 @@ const uint8_t PWM_IN_PINS[5] = {
  */
 
 /*!  
- * @defgroup ActuationValueStorage Actuation value storage
- * The order is Steering, velocity, gear, front differential, rear differential
- */
-/*@{*/
-//! Actuation values sent from the remote
-// int8_t REM_ACTUATION[5] = {0,0,MSG_TO_ACT_OFF[0],MSG_TO_ACT_OFF[1],MSG_TO_ACT_OFF[2]};
-/*@}*/
-
-/*!  
  * @defgroup PwmMeasurtement Reciever pwm duty cycle measurement variables 
  */
 /*@{*/
@@ -144,20 +135,20 @@ bool checkForPwmErrors(unsigned long duration){
  *  PWM_IN_MAX_PW/PWM_IN_MIN_PW plus/minus PWM_IN_ERROR_LIMIT.
  * @param duration Duration of the high part of the pwm signal in micro seconds.
  */
-int8_t pwmToActuation(unsigned long duration){
+actuate::act_t pwmToActuation(unsigned long duration){
   const static float actuation_scaling = 254.0 / (PWM_IN_MAX_PW - PWM_IN_MIN_PW);
   bool signal_ok = checkForPwmErrors(duration);
   if (!signal_ok) {
-    return -128;
+    return actuate::ACTUATION_PREVIOUS;
   }
   if (duration < PWM_IN_MIN_PW) {
-    return actuation::ACTUATION_MIN;
+    return actuate::ACTUATION_MIN;
   }
   if (duration > PWM_IN_MAX_PW) {
-    return actuation::ACTUATION_MAX;
+    return actuate::ACTUATION_MAX;
   }
   duration -= PWM_IN_MIN_PW;
-  int8_t actuation = (duration*actuation_scaling - actuation::ACTUATION_MAX);
+  actuate::act_t actuation = (duration*actuation_scaling - actuate::ACTUATION_MAX);
   return actuation;
 }
 
@@ -179,7 +170,7 @@ int8_t pwmToActuation(unsigned long duration){
  *  Switch middle -> forward diff 1 (locked), back diff 0 (unlocked)
  *  Switch middle -> forward diff 1 (locked), back diff 1 (locked) and REM_OVERRIDE = true
  */
-bool processPwm(actuation::Actuation values){
+bool processPwm(actuate::Actuation& values){
   const static unsigned int pwm_middle = (PWM_IN_MIN_PW + PWM_IN_MAX_PW)*0.5;
   /* If the duration since last rising edge is more than 2.2 ms:
    * Transmit recieved information to the computer
@@ -191,18 +182,18 @@ bool processPwm(actuation::Actuation values){
     uint8_t buffer_ix = switchPwmBuffer();
     interrupts();
     unsigned long duration = PWM_IN_DURATIONS[buffer_ix][0]; // Steering 
-    values.n.steering = pwmToActuation(duration);
+    values.steering(pwmToActuation(duration));
     duration = PWM_IN_DURATIONS[buffer_ix][1]; // Velocity
-    values.n.velocity = pwmToActuation(duration);
-    const actuation::act_t on = actuation::ACTUATION_MAX;
-    const actuation::act_t off = actuation::ACTUATION_MIN;
-    for (int i=2; i < values.NUMEL; i++){
+    values.velocity(pwmToActuation(duration));
+    const actuate::act_t on = actuate::ACTUATION_MAX;
+    const actuate::act_t off = actuate::ACTUATION_MIN;
+    for (size_t i=2; i < values.NUMEL; i++){
       duration = PWM_IN_DURATIONS[buffer_ix][i]; // Velocity
       if (checkForPwmErrors(duration)){
-        values.array[i] = duration < pwm_middle ? on : off;
+        values.at(i) = duration < pwm_middle ? on : off;
       } 
       else {
-        values.array[i] = -128;
+        values.at(i) = actuate::ACTUATION_PREVIOUS;
       }
     }
     // Check if the remote is disconnected
@@ -211,8 +202,8 @@ bool processPwm(actuation::Actuation values){
     // Other receivers just holds the R. Diff channel low.
     unsigned long last_received_duration = abs_difference(duration, pwm_middle);
     bool durations_ok = true;
-    for (int i=0; i<values.NUMEL; i++){
-      if (values.array[i] == -128){
+    for (size_t i=0; i<values.NUMEL; i++){
+      if (values.at(i) == actuate::ACTUATION_PREVIOUS){
         durations_ok = false;
         break;
       }
@@ -227,7 +218,7 @@ bool processPwm(actuation::Actuation values){
       REM_IDLE = false;
       // Check if remote override is on by checking if channel 5 
       // is in the rear differential lock active position.
-      REM_OVERRIDE = (values.n.r_diff == on);
+      REM_OVERRIDE = (values.r_diff() == on);
     }
     PWM_HIGH_RECEIVED = false;
     pwm_processed = true;
@@ -238,17 +229,6 @@ bool processPwm(actuation::Actuation values){
 /*
  * INTERRUPT SERVICE ROUTINES
  */
-void pwmIsrSteer(void) {
-  bool pin_status = digitalRead(PWM_IN_STEER_PIN);
-  if (pin_status) {
-    PWM_HIGH_TIME = micros();
-    PWM_HIGH_RECEIVED = true;
-  } 
-  else {
-    PWM_IN_DURATIONS[PWM_BUFFER_IX][0] = micros() - PWM_HIGH_TIME;
-  }
-}
-
 template <int N>
 void pwmIsrCommand(void) {
   bool pin_status = digitalReadFast(PWM_IN_PINS[N]);
@@ -274,8 +254,6 @@ void setup() {
     pinMode(PWM_IN_PINS[i], INPUT_PULLUP);
   }
   /* Configure interrupts */
-  // attachInterrupt(digitalPinToInterrupt(PWM_IN_STEER_PIN), pwmIsrCommand<0>, CHANGE);
-  // attachInterrupt(digitalPinToInterrupt(PWM_IN_VELOC_PIN), pwmIsr<1>, FALLING);
   attachInterrupt(digitalPinToInterrupt(PWM_IN_STEER_PIN), pwmIsr<0>, FALLING);
   attachInterrupt(digitalPinToInterrupt(PWM_IN_VELOC_PIN), pwmIsrCommand<1>, CHANGE);
   attachInterrupt(digitalPinToInterrupt(PWM_IN_GEAR_PIN),  pwmIsr<2>, FALLING);

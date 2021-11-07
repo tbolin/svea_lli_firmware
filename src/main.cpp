@@ -14,7 +14,7 @@
 #include "Adafruit_MCP23008.h"
 #include "led_control.h"
 #include "buttons.h"
-#include "actuation.h"
+#include "actuate.h"
 /*! @file main.cpp*/ 
 
 
@@ -33,20 +33,20 @@ inline uint8_t getStatusFlags() {
          | SW_EMERGENCY << 3;
 }
 
-void publishActuationValues(const actuation::Actuation values, lli_ctrl_out_t& msg, ros::Publisher& pub){
-  msg.steering = STEERING_DIRECTION*values.n.steering;
-  msg.velocity = values.n.velocity;
+void publishActuationValues(const actuate::Actuation& values, lli_ctrl_out_t& msg, ros::Publisher& pub){
+  msg.steering = STEERING_DIRECTION*values.steering();
+  msg.velocity = values.velocity();
   msg.trans_diff = bit(ENABLE_GEARCHANGE_BIT)
                  | bit(ENABLE_FDIFCHANGE_BIT)
                  | bit(ENABLE_RDIFCHANGE_BIT);
   for (int i=0; i<3; i++){
-    msg.trans_diff += values.array[i+2] > actuation::ACTUATION_NEUTRAL ? bit(i) : 0;
+    msg.trans_diff += values.at(i+2) > actuate::ACTUATION_NEUTRAL ? bit(i) : 0;
   }
   msg.ctrl = getStatusFlags();
   pub.publish(&msg);
 }
 
-void publishRemoteReading(const actuation::Actuation& values){
+void publishRemoteReading(const actuate::Actuation& values){
   publishActuationValues(
     values,
     MSG_REMOTE,
@@ -54,13 +54,13 @@ void publishRemoteReading(const actuation::Actuation& values){
   );
 }
 
-void actuateAndPublish(const actuation::Actuation& values){
+void actuateAndPublish(const actuate::Actuation& values){
   static uint8_t last_status = 0; // Code that was last sent to ROS
-  uint8_t changed = actuation::actuate(values);
+  uint8_t changed = actuate::actuate(values);
   uint8_t new_status = getStatusFlags();
   if (changed != 0 || last_status != new_status){
-    actuation::Actuation new_values;
-    actuation::getActuatedValues(new_values);
+    actuate::Actuation new_values;
+    actuate::getActuatedValues(new_values);
     publishActuationValues(
       new_values,
       MSG_ACTUATED,
@@ -82,20 +82,20 @@ void actuateAndPublish(const actuation::Actuation& values){
  * @param data Message to be evaluated
  */
 void callbackCtrlRequest(const lli_ctrl_in_t& data){  
-  SW_ACTUATION.n.steering = STEERING_DIRECTION * data.steering;
-  SW_ACTUATION.n.velocity = data.velocity;
+  SW_ACTUATION.steering(STEERING_DIRECTION * data.steering);
+  SW_ACTUATION.velocity(data.velocity);
   
   // Set the on/off values
   for (int i=0; i<3; i++){
     // Only change gear/diff settings if the corresponding enable change bit is set
     if(data.trans_diff & bit(ENABLE_ACT_CHANGE_BITS[i])){
-      const actuation::act_t on = actuation::ACTUATION_MAX;
-      const actuation::act_t off = actuation::ACTUATION_MIN;
+      const actuate::act_t on = actuate::ACTUATION_MAX;
+      const actuate::act_t off = actuate::ACTUATION_MIN;
       int8_t is_on = data.trans_diff & bit(ACT_BITS[i]);
-      SW_ACTUATION.array[i+2] = is_on ? on : off; 
+      SW_ACTUATION.at(i+2) = is_on ? on : off; 
     }
     else { // Otherwise use the previous value
-      SW_ACTUATION.array[i+2] = -128;
+      SW_ACTUATION.at(i+2) = actuate::ACTUATION_PREVIOUS;
     }
   }
   SW_IDLE = false; 
@@ -146,8 +146,8 @@ bool checkEmergencyBrake(){
   static States state = NO_EMERGENCY;
   static unsigned long last_time = millis();
   const unsigned long reverse_wait_time = 50; // (ms)
-  const actuation::Actuation init_brake_actuation = {-128,15,-128,-128,-128};
-  const actuation::Actuation brake_actuation = {-128,-127,-128,-128,-128};
+  const actuate::Actuation init_brake_actuation = {-128,15,-128,-128,-128};
+  const actuate::Actuation brake_actuation = {-128,-127,-128,-128,-128};
   // const unsigned long minimum_emergency_duration = 500;
   unsigned long wait_duration = (millis() - last_time);
   if (SW_EMERGENCY == false) {
@@ -212,7 +212,7 @@ Adafruit_MCP23008 gpio_extender(Master1);
 
 //! Arduino setup function
 void setup() {
-  actuation::setup();
+  actuate::setup();
   /* ROS setup */
   rosSetup();
   pinMode(LED_BUILTIN, OUTPUT);
@@ -233,7 +233,7 @@ void loop() {
     SW_IDLE = true;
   }
   checkEmergencyBrake();
-  actuation::Actuation remote_actuations;
+  actuate::Actuation remote_actuations;
   if (pwm_reader::processPwm(remote_actuations)){
     if (!pwm_reader::REM_IDLE){
       publishRemoteReading(remote_actuations);
@@ -249,7 +249,7 @@ void loop() {
   }
   if (pwm_reader::REM_IDLE && SW_IDLE && !SW_EMERGENCY) {
     if (!all_idle){
-      actuateAndPublish(actuation::IDLE_ACTUATION);
+      actuateAndPublish(actuate::IDLE_ACTUATION);
       gpio_extender.digitalWrite(SERVO_PWR_ENABLE_PIN, LOW);
     }
     all_idle = true;
@@ -266,11 +266,11 @@ void loop() {
     ;
   }
   buttons::updateButtons();
-  actuation::CalibState calibration_status = actuation::callibrateSteering();
+  actuate::CalibState calibration_status = actuate::callibrateSteering();
   // LED logic
   switch (calibration_status)
   {
-  case actuation::CalibState::NOT_CALIBRATING:
+  case actuate::CalibState::NOT_CALIBRATING:
     if (all_idle && !SW_EMERGENCY) {
       led::blinkLEDs();
     }
@@ -297,13 +297,13 @@ void loop() {
       }
     }
     break;
-  case actuation::CalibState::TURN_LEFT:
+  case actuate::CalibState::TURN_LEFT:
     led::setLEDs(led::color_blue);
     break;
-  case actuation::CalibState::TURN_RIGHT:
+  case actuate::CalibState::TURN_RIGHT:
     led::setLEDs(led::color_blue);
     break;
-  case actuation::CalibState::DONE:
+  case actuate::CalibState::DONE:
     led::blinkLEDs();
     break;
   }

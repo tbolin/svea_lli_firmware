@@ -2,169 +2,94 @@
 #define SVEA_ACTUATION
 
 #include <cstdint>
+#include <array>
 
-namespace actuation{
+namespace actuate{
+
+typedef int8_t act_t;
 /*
- * @defgroup ActuationConstants Actuation constants 
+ * @defgroup ActuationConstants Actuation constants
  */
  /*@{*/
-static const int PWM_OUT_BITS = 16; //!< Output pwm resolution in bits
-static const int PWM_OUT_RES = 1 << (PWM_OUT_BITS); //!< Output pwm resolution in number of states
-typedef int8_t act_t;
 
-//! Default actuation minium pulse widths (corresponds to -127)
-static const float DEFAULT_PWM_OUT_MIN_PW[] = {0.800, 1.000, 1.000, 1.000, 2.000};
-//! Default actuation maximum pulse widths (correspoinds to 127)
-static const float DEFAULT_PWM_OUT_MAX_PW[] = {2.200, 2.000, 2.000, 2.000, 1.000};
-static const act_t ACTUATION_MIN      = -127;    //!< Minimum actuation value 
-static const act_t ACTUATION_NEUTRAL  = 0;       //!< Neutral actuation value 
-static const act_t ACTUATION_MAX      = 127;     //!< Maximum actuation value
-static const act_t WILDCARD           = -128; 
-static const float PWM_OUT_FREQUENCY = 100.0;     //!< Pwm frequency (Hz)
+static constexpr act_t ACTUATION_MIN      = -127;    //!< Minimum actuation value
+static constexpr act_t ACTUATION_NEUTRAL  = 0;       //!< Neutral actuation value
+static constexpr act_t ACTUATION_MAX      = 127;     //!< Maximum actuation value
+static constexpr act_t ACTUATION_PREVIOUS = -128;    //!< Actuation valuethat will just use the orevious value
 
-struct actuation_t_ {
-    act_t steering;
-    act_t velocity;
-    act_t gear;
-    act_t f_diff;
-    act_t r_diff;
-};
-
-union Actuation
-{
-    static constexpr uint8_t NUMEL = sizeof(actuation_t_) / sizeof(act_t);
-    actuation_t_ n = {
-        ACTUATION_NEUTRAL,
-        ACTUATION_NEUTRAL,
-        ACTUATION_MIN,
-        ACTUATION_MIN,
-        ACTUATION_MIN
-    };
-    act_t array[NUMEL];
-};
-
-static const Actuation IDLE_ACTUATION = {
-    ACTUATION_NEUTRAL,
-    ACTUATION_NEUTRAL,
-    ACTUATION_MIN,
-    ACTUATION_MIN,
-    ACTUATION_MIN
-};
-
-static const act_t DEAD_ZONE = 2; //!< Deadzone for actuation signals
-
-/*!  
-* @defgroup PwmOutputChannels PWM output pins on the Teensy
-*/
-/*@{*/
-static const act_t PWM_OUT_STEER_PIN = 15; //!< Pwm pin for steering
-static const act_t PWM_OUT_VELOC_PIN = 5; //!< Pwm pin for velocity
-static const act_t PWM_OUT_GEAR_PIN = 14;  //!< Pwm pin for transmission
-static const act_t PWM_OUT_FDIFF_PIN = 9; //!< Pwm pin for front differential lock
-static const act_t PWM_OUT_RDIFF_PIN = 6; //!< Pwm pin for rear differential lock
-//! Array with mapping for the PWM channels
-static const act_t PWM_OUT_PINS[5] = {
-    PWM_OUT_STEER_PIN,
-    PWM_OUT_VELOC_PIN,
-    PWM_OUT_GEAR_PIN,
-    PWM_OUT_FDIFF_PIN,
-    PWM_OUT_RDIFF_PIN
-};
 /*@}*/
 
-/**
- * @brief Setup actuation 
- */
-void setup();
 
-/*
- * ACTUATION FUNCTIONS
- */
+class Actuation {
 
-/*! 
- * @brief Set actuation PWM
- * convert a 8 bit actuation value to a pwm signal and send it to the pwm board. 
- * The value gets scaled to a duration that suits the servos (approximately 
- * 1 to 2 milli seconds).
- * @see INPUT_SCALE
- * @see PWM_NEUTRAL_TICK
- * To avoid servo jitter at neutral a small dead zone exists around 0. 
- * @see DEAD_ZONE
- * @param channel The channel (pin) of the pwm board to send to. 
- * @param in_value Value, between -127 and 127. to send.
- */ 
-inline void setPwmDriver(act_t channel, act_t actuation_value);
+public:
+  static constexpr size_t STEER_IX = 0;
+  static constexpr size_t VEL_IX = 1;
+  static constexpr size_t GEAR_IX = 2;
+  static constexpr size_t F_DIFF_IX = 3;
+  static constexpr size_t R_DIFF_IX = 4;
+  static constexpr size_t NUMEL = 5;
+  static constexpr std::array<act_t, NUMEL> DEFAULT = {
+    ACTUATION_PREVIOUS,
+    ACTUATION_PREVIOUS,
+    ACTUATION_PREVIOUS,
+    ACTUATION_PREVIOUS,
+    ACTUATION_PREVIOUS
+  };
 
-/*! @brief Send settings to the pwm board through setPwmDriver()
- * 
- * If any setting or actuation code have changed, the current 
- * actuation values and flags will be published on /lli/ctrl_actuated.
- * If nothing have been changed, nothing will be sent to the
- * pwm register or /lli/ctrl_actuated.
- * @see setPwmDriver
- * @param actuation_values array containg 5 values. 
- */
-uint8_t actuate(const Actuation& new_values);
+  constexpr Actuation(): act_values_(DEFAULT) {}
+  constexpr Actuation(const std::array<act_t, NUMEL>& a) : act_values_(a){}
+  constexpr Actuation(act_t steering,
+            act_t velocity,
+            act_t gear,
+            act_t f_diff,
+            act_t r_diff) : act_values_({steering, velocity, gear, f_diff, r_diff}) {}
+  Actuation(const Actuation& other) : act_values_(other.act_values_) {}
 
-/*!
- * @brief return the currently active actuation values
- */
-void getActuatedValues(Actuation& values);
+  act_t steering() const;
+  act_t velocity() const;
+  act_t gear() const;
+  act_t f_diff() const;
+  act_t r_diff() const;
 
+  void steering(act_t value);
+  void velocity(act_t value);
+  void gear(act_t value);
+  void f_diff(act_t value);
+  void r_diff(act_t value);
 
-/* Steering calibration */
+private:
+  std::array<act_t, NUMEL> act_values_;
 
-//! enum representing states of the calibrate function
-enum CalibState {
-    NOT_CALIBRATING,
-    TURN_LEFT,
-    TURN_RIGHT,
-    DONE,
+public:
+
+  act_t& at(size_t ix){
+    return act_values_.at(ix);
+  }
+
+  act_t at(size_t ix) const{
+    return act_values_.at(ix);
+  }
+
+  act_t& operator [] (size_t ix) {
+    return act_values_[ix];
+  }
+
+  act_t operator [] (size_t ix) const {
+    return act_values_[ix];
+  }
+
+  static const Actuation initial(){
+    return Actuation(
+        ACTUATION_NEUTRAL,
+        ACTUATION_NEUTRAL,
+        ACTUATION_MIN,
+        ACTUATION_MIN,
+        ACTUATION_MIN);
+  }
+  static constexpr Actuation emergency();
+
 };
 
-//! EEPROM address where the steering calibration values are stored.
-const int EEP_STEERING_ADDRESS = 0;
-
-/*!
- * @brief Steering callibration functionality. Should be called in every loop update.
- *
- * Initiate callibration by holding down button 0 for 1 second.
- * The LEDs should turn yellow. Now turn the tires as far to the left
- * as they can go without pushing against the chassis. 
- * Push button 0 again. The LEDs should turn blue. 
- * Turn the tire as far to the right as they can go without
- * pushing against the chassis. 
- * Push button 0 again and the LEDs should blink for a short while.
- * The callibration is complet and the values have been saved to flash.
- * 
- * The calibration process can be aborted by pushing button 1.
- * 
- * @return true if a calibration is ongoing, false otherwise
- */
-CalibState callibrateSteering();
-
-/** @brief set the pulse widths that will correspond to the min and max actuation values
- * 
- * An actuation value of -127 will correspond to `desired_min_pwm`, and
- * an actuation value of 127 will correspond to `desired_max_pwm`.
- */ 
-void setSteeringPwm(float desired_min_pwm, float desired_max_pwm);
-
-/**
- * @brief Load saved steering claibration values from EEPROM. 
- * return true if the values are found
- */
-bool loadSteeringValues(float &min_pwm, float &max_pwm);
-
-/**
- * @brief Save steering calibration pulse widths to EEPROM.
- */
-void saveSteeringValues(float min_pwm, float max_pwm);
-
-/**
- * @brief reset steering calibration to default and ovverwrite saved values
- */
-void resetSteeringValues();
-
-} // namespace actuation
+} //namespace actuate
 #endif //SVEA_ACTUATION
